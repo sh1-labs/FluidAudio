@@ -321,8 +321,7 @@ extension ChunkProcessor {
 
         if chunkOutputs.count > 1 {
             let vocabulary = await manager.vocabulary
-            let spliceSafeTokenIds = Self.spliceSafeTokenIds(vocabulary: vocabulary)
-            let caseVariantIds = Self.caseVariantCanonicalIds(vocabulary: vocabulary)
+            let (spliceSafeTokenIds, caseVariantIds) = await manager.seamTokenIds
             for chunk in chunkOutputs.dropFirst() {
                 mergedTokens = mergeChunks(
                     mergedTokens,
