@@ -3,7 +3,8 @@ import Foundation
 extension AsrManager {
 
     internal func transcribeWithState(
-        _ audioSamples: [Float], decoderState: inout TdtDecoderState, language: Language? = nil
+        _ audioSamples: [Float], decoderState: inout TdtDecoderState, language: Language? = nil,
+        windows: DecodedWindows? = nil
     ) async throws -> ASRResult {
         guard isAvailable else { throw ASRError.notInitialized }
         let minimumRequiredSamples = ASRConstants.minimumRequiredSamples(forSampleRate: config.sampleRate)
@@ -46,7 +47,8 @@ extension AsrManager {
                 guard let self else { return }
                 await self.progressEmitter.report(progress: progress)
             },
-            language: language
+            language: language,
+            windows: windows
         )
 
         return result

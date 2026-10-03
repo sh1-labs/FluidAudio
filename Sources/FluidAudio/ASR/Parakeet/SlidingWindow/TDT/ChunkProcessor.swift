@@ -452,11 +452,18 @@ struct ChunkProcessor {
         self.init(sampleSource: ArrayAudioSampleSource(samples: audioSamples))
     }
 
+    /// - Parameters:
+    ///   - windows: Windows decoded earlier from the same recording, reused where their
+    ///     samples and settings match; windows decoded now are added.
+    ///   - leavesLastWindow: Decodes every window but the last, which depends on where
+    ///     the recording ends, and returns an empty result (`AsrManager.transcribeAhead`).
     func process(
         using manager: AsrManager,
         startTime: Date,
         progressHandler: ((Double) async -> Void)? = nil,
-        language: Language? = nil
+        language: Language? = nil,
+        windows: DecodedWindows? = nil,
+        leavesLastWindow: Bool = false
     ) async throws -> ASRResult {
         let requestedConcurrency = max(1, await manager.parallelChunkConcurrency)
         let workers = await makeWorkerPool(using: manager, count: requestedConcurrency) ?? [manager]
@@ -471,6 +478,7 @@ struct ChunkProcessor {
         // Dual-decode opt-in (only effective for v3 + no-mel; other paths
         // are not changed by the flag).
         if dualDecodeArbitration, !melChunkContext, modelVersion?.isV3Family == true {
+            if leavesLastWindow { return Self.emptyResult }
             return try await processWithDualDecodeArbitration(
                 using: manager,
                 workers: workers,
@@ -552,6 +560,9 @@ struct ChunkProcessor {
                 if audioEnd <= chunkStart {
                     break
                 }
+                if leavesLastWindow && isLastChunk {
+                    break
+                }
 
                 // In the default path, contextSamples means mel/STFT context
                 // and is skipped by the decoder. In v3/no-mel mode, the
@@ -577,42 +588,55 @@ struct ChunkProcessor {
                 let chunkStartOffset = warmupSamples > 0 ? contextStart : chunkStart
                 chunkOutputs.append(nil)
 
+                let key = DecodedWindows.Key(
+                    firstSample: contextStart, sampleCount: chunkLengthWithContext, contextSamples: contextSamples,
+                    chunkStart: chunkStartOffset, isLastChunk: isLastChunk,
+                    emitTokensAfterFrame: emitTokensAfterFrame, language: language?.rawValue)
+
                 group.addTask {
-                    var decoderState = TdtDecoderState.make(decoderLayers: decoderLayers)
-                    decoderState.reset()
+                    @Sendable func decode() async throws -> [TokenWindow] {
+                        var decoderState = TdtDecoderState.make(decoderLayers: decoderLayers)
+                        decoderState.reset()
 
-                    let (windowTokens, windowTimestamps, windowConfidences, windowDurations) =
-                        try await Self
-                        .transcribeChunk(
-                            samples: chunkSamplesArray,
-                            contextSamples: contextSamples,
-                            chunkStart: chunkStartOffset,
-                            isLastChunk: isLastChunk,
-                            using: worker,
-                            decoderState: &decoderState,
-                            maxModelSamples: maxModelSamples,
-                            language: language,
-                            emitTokensAfterFrame: emitTokensAfterFrame,
-                            initialTimeIndexOverride: emitTokensAfterFrame == nil ? nil : 0
-                        )
+                        let (windowTokens, windowTimestamps, windowConfidences, windowDurations) =
+                            try await Self
+                            .transcribeChunk(
+                                samples: chunkSamplesArray,
+                                contextSamples: contextSamples,
+                                chunkStart: chunkStartOffset,
+                                isLastChunk: isLastChunk,
+                                using: worker,
+                                decoderState: &decoderState,
+                                maxModelSamples: maxModelSamples,
+                                language: language,
+                                emitTokensAfterFrame: emitTokensAfterFrame,
+                                initialTimeIndexOverride: emitTokensAfterFrame == nil ? nil : 0
+                            )
 
-                    guard
-                        windowTokens.count == windowTimestamps.count
-                            && windowTokens.count == windowConfidences.count
-                    else {
-                        throw ASRError.processingFailed("Token, timestamp, and confidence arrays are misaligned")
+                        guard
+                            windowTokens.count == windowTimestamps.count
+                                && windowTokens.count == windowConfidences.count
+                        else {
+                            throw ASRError.processingFailed("Token, timestamp, and confidence arrays are misaligned")
+                        }
+
+                        let durations =
+                            windowDurations.count == windowTokens.count
+                            ? windowDurations : Array(repeating: 0, count: windowTokens.count)
+
+                        return zip(
+                            zip(zip(windowTokens, windowTimestamps), windowConfidences), durations
+                        ).map {
+                            (token: $0.0.0.0, timestamp: $0.0.0.1, confidence: $0.0.1, duration: $0.1)
+                        }
                     }
 
-                    let durations =
-                        windowDurations.count == windowTokens.count
-                        ? windowDurations : Array(repeating: 0, count: windowTokens.count)
-
-                    let windowData: [TokenWindow] = zip(
-                        zip(zip(windowTokens, windowTimestamps), windowConfidences), durations
-                    ).map {
-                        (token: $0.0.0.0, timestamp: $0.0.0.1, confidence: $0.0.1, duration: $0.1)
+                    let windowData: [TokenWindow]
+                    if let windows {
+                        windowData = try await windows.tokens(for: key, samples: chunkSamplesArray, decode: decode)
+                    } else {
+                        windowData = try await decode()
                     }
-
                     return TaskResult(index: index, tokens: windowData, workerIndex: workerIndex)
                 }
                 inFlight += 1
@@ -645,6 +669,8 @@ struct ChunkProcessor {
                 try await collectNextResult(&group)
             }
         }
+
+        if leavesLastWindow { return Self.emptyResult }
 
         let orderedChunkOutputs = chunkOutputs.compactMap { $0 }
 
@@ -726,6 +752,9 @@ struct ChunkProcessor {
             processingTime: Date().timeIntervalSince(startTime)
         )
     }
+
+    /// What a pass that leaves the last window returns: its windows are in `DecodedWindows`.
+    private static let emptyResult = ASRResult(text: "", confidence: 0, duration: 0, processingTime: 0)
 
     private func makeWorkerPool(using manager: AsrManager, count: Int) async -> [AsrManager]? {
         guard count > 0 else { return nil }
