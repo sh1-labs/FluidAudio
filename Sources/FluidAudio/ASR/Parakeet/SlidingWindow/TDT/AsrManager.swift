@@ -11,6 +11,8 @@ public actor AsrManager {
 
     internal var preprocessorModel: MLModel?
     internal var encoderModel: MLModel?
+    /// The encoder for short audio, once `loadShortEncoder` has made and checked it.
+    internal var shortEncoder: ShortEncoder?
     internal var decoderModel: MLModel?
     internal var jointModel: MLModel?
 
@@ -142,6 +144,7 @@ public actor AsrManager {
         self.asrModels = models
         self.preprocessorModel = models.preprocessor
         self.encoderModel = models.encoder
+        self.shortEncoder = nil
         self.decoderModel = models.decoder
         self.jointModel = models.joint
         self.vocabulary = models.vocabulary
@@ -222,6 +225,7 @@ public actor AsrManager {
         asrModels = nil
         preprocessorModel = nil
         encoderModel = nil
+        shortEncoder = nil
         decoderModel = nil
         jointModel = nil
         Task { await sharedMLArrayCache.clear() }

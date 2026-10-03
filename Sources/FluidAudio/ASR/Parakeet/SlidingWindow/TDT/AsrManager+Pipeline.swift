@@ -187,7 +187,12 @@ extension AsrManager {
                     encoderInput = try Self.declaringFullMelLength(encoderInput)
                 }
                 try Task.checkCancellation()
-                encoderOutputProvider = try await encoderModel.compatPrediction(
+                var encoder = encoderModel
+                if let shortEncoder, let cut = try ShortEncoder.cut(encoderInput, to: shortEncoder.melFrames) {
+                    // Audio that fits it gets the same output from the short encoder, sooner.
+                    (encoder, encoderInput) = (shortEncoder.model, cut)
+                }
+                encoderOutputProvider = try await encoder.compatPrediction(
                     from: encoderInput,
                     options: predictionOptions
                 )
