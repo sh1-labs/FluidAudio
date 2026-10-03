@@ -21,6 +21,9 @@ public actor AsrManager {
 
     internal let progressEmitter = ProgressEmitter()
 
+    /// See `workerCopies`.
+    private var workers: [AsrManager] = []
+
     /// Number of decoder layers for the current model.
     /// Returns 2 if models not loaded (v2/v3 default, tdtCtc110m uses 1).
     public var decoderLayerCount: Int {
@@ -60,7 +63,21 @@ public actor AsrManager {
     }
 
     /// Cached vocabulary loaded once during initialization
-    internal var vocabulary: [Int: String] = [:]
+    internal var vocabulary: [Int: String] = [:] {
+        didSet { foundSeamTokenIds = nil }
+    }
+    /// The ids `ChunkProcessor` merges windows with, found in `vocabulary` on first use
+    /// and kept: finding them again for every long transcription took a few milliseconds.
+    internal var seamTokenIds: (spliceSafe: Set<Int>?, caseVariants: [Int: Int]?) {
+        if let foundSeamTokenIds { return foundSeamTokenIds }
+        let found = (
+            spliceSafe: ChunkProcessor.spliceSafeTokenIds(vocabulary: vocabulary),
+            caseVariants: ChunkProcessor.caseVariantCanonicalIds(vocabulary: vocabulary)
+        )
+        foundSeamTokenIds = found
+        return found
+    }
+    private var foundSeamTokenIds: (spliceSafe: Set<Int>?, caseVariants: [Int: Int]?)?
     /// Sentence-final punctuation ids resolved from `vocabulary` (issue #905).
     internal var punctuationTokenIds: Set<Int> = Set(ASRConstants.punctuationTokens)
     #if DEBUG
@@ -110,9 +127,16 @@ public actor AsrManager {
         }
     }
 
-    internal func makeWorkerClone() -> AsrManager? {
+    /// Copies of this manager sharing its models, `count` of them, for decoding a long
+    /// recording's windows side by side; nil if no models are loaded. They hold no state of
+    /// their own, so they are made once and kept until the models change: making three for
+    /// each recording took about 10 ms, and each new copy also allocated input buffers.
+    internal func workerCopies(_ count: Int) -> [AsrManager]? {
         guard let models = asrModels else { return nil }
-        return AsrManager(config: config, models: models)
+        while workers.count < count {
+            workers.append(AsrManager(config: config, models: models))
+        }
+        return Array(workers.prefix(count))
     }
 
     /// Returns the current transcription progress stream for offline long audio (>240,000 samples / ~15s).
@@ -142,6 +166,7 @@ public actor AsrManager {
         logger.info("Loading AsrManager with provided models")
 
         self.asrModels = models
+        self.workers = []
         self.preprocessorModel = models.preprocessor
         self.encoderModel = models.encoder
         self.shortEncoder = nil
@@ -223,6 +248,7 @@ public actor AsrManager {
 
     public func cleanup() {
         asrModels = nil
+        workers = []
         preprocessorModel = nil
         encoderModel = nil
         shortEncoder = nil

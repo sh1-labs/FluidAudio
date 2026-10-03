@@ -687,8 +687,7 @@ struct ChunkProcessor {
 
         if orderedChunkOutputs.count > 1 {
             let vocabulary = await manager.vocabulary
-            let spliceSafeTokenIds = Self.spliceSafeTokenIds(vocabulary: vocabulary)
-            let caseVariantIds = Self.caseVariantCanonicalIds(vocabulary: vocabulary)
+            let (spliceSafeTokenIds, caseVariantIds) = await manager.seamTokenIds
             for chunk in orderedChunkOutputs.dropFirst() {
                 mergedTokens = mergeChunks(
                     mergedTokens,
@@ -720,7 +719,7 @@ struct ChunkProcessor {
         // Documentation/ASR/LongTranscription.md.
         if orderedChunkOutputs.count > 1, mergedTokens.count > 1, await manager.seamGapRepair {
             let vocabulary = await manager.vocabulary
-            let spliceSafeTokenIds = Self.spliceSafeTokenIds(vocabulary: vocabulary)
+            let spliceSafeTokenIds = await manager.seamTokenIds.spliceSafe
             let minGapSeconds = await manager.seamGapRepairMinGapSeconds
             let speechRmsThreshold = try adaptiveSpeechRmsThreshold()
 
@@ -758,18 +757,14 @@ struct ChunkProcessor {
 
     private func makeWorkerPool(using manager: AsrManager, count: Int) async -> [AsrManager]? {
         guard count > 0 else { return nil }
-        var workers: [AsrManager] = [manager]
         if count == 1 {
-            return workers
+            return [manager]
         }
-        for _ in 1..<count {
-            guard let clone = await manager.makeWorkerClone() else {
-                return nil
-            }
-            workers.append(clone)
+        guard let copies = await manager.workerCopies(count - 1) else {
+            return nil
         }
-        logger.debug("ChunkProcessor using worker pool of size \(workers.count)")
-        return workers
+        logger.debug("ChunkProcessor using worker pool of size \(count)")
+        return [manager] + copies
     }
 
     func readSamples(offset: Int, count: Int) throws -> [Float] {
