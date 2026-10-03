@@ -382,6 +382,21 @@ public actor AsrManager {
         return try await transcribe(audioFloatArray, decoderState: &decoderState, language: language)
     }
 
+    /// Decodes the windows of a recording in progress that are already complete, into
+    /// `windows`, while the recording goes on. A later `transcribe` of the same recording,
+    /// grown longer, given the same `windows` and `language`, decodes only the rest; the
+    /// text is the same. Audio of 15 s or less is a single window, left for `transcribe`.
+    ///
+    /// It can run alongside `transcribe`, but the two then share the Neural Engine.
+    public func transcribeAhead(
+        _ audioSamples: [Float], language: Language? = nil, windows: DecodedWindows
+    ) async throws {
+        guard isAvailable else { throw ASRError.notInitialized }
+        guard audioSamples.count > ASRConstants.maxModelSamples else { return }
+        _ = try await ChunkProcessor(audioSamples: audioSamples).process(
+            using: self, startTime: Date(), language: language, windows: windows, leavesLastWindow: true)
+    }
+
     /// Transcribe audio from a file URL.
     ///
     /// Performs speech-to-text transcription on the audio file at the provided URL.
@@ -496,19 +511,23 @@ public actor AsrManager {
     ///     in favor of matching candidates. Silently ignored for v2 / tdtCtc110m / tdtJa.
     /// - Note: Progress stream is emitted only when `audioSamples.count > ASRConstants.maxModelSamples` (~15s).
     ///         Use `transcriptionProgressStream` before calling this method to observe progress.
+    ///   - windows: Windows of this recording decoded while it was recorded
+    ///     (`transcribeAhead`); only the rest are decoded now.
     /// - Returns: An ASRResult containing the transcribed text and token timings
     /// - Throws: ASRError if transcription fails or models are not initialized
     public func transcribe(
         _ audioSamples: [Float],
         decoderState: inout TdtDecoderState,
-        language: Language? = nil
+        language: Language? = nil,
+        windows: DecodedWindows? = nil
     ) async throws -> ASRResult {
         let shouldEmitProgress = audioSamples.count > ASRConstants.maxModelSamples
         if shouldEmitProgress {
             _ = await progressEmitter.ensureSession()
         }
         do {
-            let result = try await transcribeWithState(audioSamples, decoderState: &decoderState, language: language)
+            let result = try await transcribeWithState(
+                audioSamples, decoderState: &decoderState, language: language, windows: windows)
 
             if shouldEmitProgress {
                 await progressEmitter.finishSession()
