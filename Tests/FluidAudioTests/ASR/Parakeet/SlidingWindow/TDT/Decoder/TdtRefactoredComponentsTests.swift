@@ -402,3 +402,39 @@ final class TdtRefactoredComponentsTests: XCTestCase {
         }
     }
 }
+
+/// Output backings, checked against the cached Parakeet models when they are present.
+final class TdtOutputBackingsTests: XCTestCase {
+
+    /// The named model from whichever v3-family cache is present.
+    private func cachedModel(_ name: String) throws -> MLModel {
+        let versions: [AsrModelVersion] = [.v3, .redux, .ultra]
+        let urls = versions.map { AsrModels.defaultCacheDirectory(for: $0).appendingPathComponent(name) }
+        guard let url = urls.first(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
+            throw XCTSkip("\(name) is not in the model cache")
+        }
+        return try MLModel(contentsOf: url)
+    }
+
+    func testDecoderBackingsCoverTheProjectionButNotTheState() throws {
+        let decoder = try cachedModel(ModelNames.ASR.decoderFile)
+        let backings = try TdtModelInference.outputBackings(for: decoder, excluding: ["h_out", "c_out"])
+
+        XCTAssertNil(backings["h_out"])
+        XCTAssertNil(backings["c_out"])
+        let projection = try XCTUnwrap(backings["decoder"])
+        let described = try XCTUnwrap(
+            decoder.modelDescription.outputDescriptionsByName["decoder"]?.multiArrayConstraint)
+        XCTAssertEqual(projection.shape, described.shape)
+        XCTAssertEqual(projection.dataType, described.dataType)
+    }
+
+    func testJointBackingsCoverEveryOtherOutput() throws {
+        let joint = try cachedModel(ModelNames.ASR.jointV3File)
+        let backed: Set<String> = ["token_id", "token_prob", "duration"]
+        let backings = try TdtModelInference.outputBackings(for: joint, excluding: backed)
+
+        let outputs = Set(joint.modelDescription.outputDescriptionsByName.keys)
+        XCTAssertEqual(Set(backings.keys), outputs.subtracting(backed))
+    }
+}

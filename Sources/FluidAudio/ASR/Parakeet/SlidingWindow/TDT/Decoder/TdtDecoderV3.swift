@@ -192,6 +192,12 @@ internal struct TdtDecoderV3: Sendable {
         let tokenIdBacking = try MLMultiArray(shape: [1, 1, 1] as [NSNumber], dataType: .int32)
         let tokenProbBacking = try MLMultiArray(shape: [1, 1, 1] as [NSNumber], dataType: .float32)
         let durationBacking = try MLMultiArray(shape: [1, 1, 1] as [NSNumber], dataType: .int32)
+        // Back the remaining outputs too (the decoder projection, the joint's top-K), so no
+        // step allocates. The projection's buffer is reused: `predictorOutput` always holds
+        // the latest one, and a new call gets new buffers.
+        let decoderBackings = try TdtModelInference.outputBackings(for: decoderModel, excluding: ["h_out", "c_out"])
+        let jointBackings = try TdtModelInference.outputBackings(
+            for: jointModel, excluding: ["token_id", "token_prob", "duration"])
 
         // Initialize decoder LSTM state for a fresh utterance
         // This ensures clean state when starting transcription
@@ -210,7 +216,8 @@ internal struct TdtDecoderV3: Sendable {
                 state: decoderState,
                 model: decoderModel,
                 targetArray: reusableTargetArray,
-                targetLengthArray: reusableTargetLengthArray
+                targetLengthArray: reusableTargetLengthArray,
+                outputBackings: decoderBackings
             )
             let proj = try extractFeatureValue(
                 from: primed.output, key: "decoder", errorMessage: "Invalid decoder output")
@@ -251,7 +258,8 @@ internal struct TdtDecoderV3: Sendable {
                     state: stateToUse,
                     model: decoderModel,
                     targetArray: reusableTargetArray,
-                    targetLengthArray: reusableTargetLengthArray
+                    targetLengthArray: reusableTargetLengthArray,
+                    outputBackings: decoderBackings
                 )
             }
 
@@ -273,7 +281,8 @@ internal struct TdtDecoderV3: Sendable {
                 tokenIdBacking: tokenIdBacking,
                 tokenProbBacking: tokenProbBacking,
                 durationBacking: durationBacking,
-                needsTopK: needsTopK
+                needsTopK: needsTopK,
+                outputBackings: jointBackings
             )
 
             // Predict token (what to emit) and duration (how many frames to skip)
@@ -363,7 +372,8 @@ internal struct TdtDecoderV3: Sendable {
                     tokenIdBacking: tokenIdBacking,
                     tokenProbBacking: tokenProbBacking,
                     durationBacking: durationBacking,
-                    needsTopK: needsTopK
+                    needsTopK: needsTopK,
+                    outputBackings: jointBackings
                 )
 
                 label = innerDecision.token
@@ -441,7 +451,8 @@ internal struct TdtDecoderV3: Sendable {
                     state: decoderResult.newState,
                     model: decoderModel,
                     targetArray: reusableTargetArray,
-                    targetLengthArray: reusableTargetLengthArray
+                    targetLengthArray: reusableTargetLengthArray,
+                    outputBackings: decoderBackings
                 )
                 hypothesis.decState = step.newState
                 decoderState.predictorOutput = try extractFeatureValue(
@@ -499,7 +510,8 @@ internal struct TdtDecoderV3: Sendable {
                         state: stateToUse,
                         model: decoderModel,
                         targetArray: reusableTargetArray,
-                        targetLengthArray: reusableTargetLengthArray
+                        targetLengthArray: reusableTargetLengthArray,
+                        outputBackings: decoderBackings
                     )
                 }
 
@@ -528,7 +540,8 @@ internal struct TdtDecoderV3: Sendable {
                     tokenIdBacking: tokenIdBacking,
                     tokenProbBacking: tokenProbBacking,
                     durationBacking: durationBacking,
-                    needsTopK: needsTopK
+                    needsTopK: needsTopK,
+                    outputBackings: jointBackings
                 )
 
                 let token = decision.token
@@ -568,7 +581,8 @@ internal struct TdtDecoderV3: Sendable {
                         state: decoderResult.newState,
                         model: decoderModel,
                         targetArray: reusableTargetArray,
-                        targetLengthArray: reusableTargetLengthArray
+                        targetLengthArray: reusableTargetLengthArray,
+                        outputBackings: decoderBackings
                     )
                     hypothesis.decState = step.newState
                     decoderState.predictorOutput = try extractFeatureValue(

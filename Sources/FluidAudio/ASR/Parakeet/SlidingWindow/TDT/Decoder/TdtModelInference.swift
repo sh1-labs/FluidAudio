@@ -13,6 +13,28 @@ internal struct TdtModelInference: Sendable {
         self.predictionOptions = AsrModels.optimizedPredictionOptions()
     }
 
+    /// Preallocated buffers for `model`'s fixed-shape outputs other than `backed`.
+    ///
+    /// Core ML allocates an IOSurface for every output without a backing, on every
+    /// prediction. The decoder and joint run once per decoding step, so their unbacked
+    /// outputs (the decoder projection, the joint's top-K) cost an allocation per step.
+    /// Backing them as well keeps the output identical and cut decoding time by about 15%
+    /// on Parakeet TDT v3.
+    static func outputBackings(for model: MLModel, excluding backed: Set<String>) throws -> [String: MLMultiArray] {
+        var backings: [String: MLMultiArray] = [:]
+        for (name, description) in model.modelDescription.outputDescriptionsByName {
+            guard !backed.contains(name), let constraint = description.multiArrayConstraint else { continue }
+            // Only outputs with one possible shape; the Parakeet models list it as a single enumerated shape.
+            let shapes = constraint.shapeConstraint
+            let fixed =
+                shapes.type == .unspecified || (shapes.type == .enumerated && shapes.enumeratedShapes.count == 1)
+            guard fixed else { continue }
+            backings[name] = try ANEMemoryUtils.createAlignedArray(
+                shape: constraint.shape, dataType: constraint.dataType)
+        }
+        return backings
+    }
+
     /// Execute decoder LSTM with state caching.
     ///
     /// - Parameters:
@@ -21,6 +43,7 @@ internal struct TdtModelInference: Sendable {
     ///   - model: Decoder MLModel
     ///   - targetArray: Pre-allocated array for token input
     ///   - targetLengthArray: Pre-allocated array for length (always 1)
+    ///   - outputBackings: Buffers for the decoder's other outputs (`outputBackings(for:excluding:)`)
     ///
     /// - Returns: Tuple of (output features, updated state)
     func runDecoder(
@@ -28,7 +51,8 @@ internal struct TdtModelInference: Sendable {
         state: TdtDecoderState,
         model: MLModel,
         targetArray: MLMultiArray,
-        targetLengthArray: MLMultiArray
+        targetLengthArray: MLMultiArray,
+        outputBackings: [String: MLMultiArray] = [:]
     ) throws -> (output: MLFeatureProvider, newState: TdtDecoderState) {
 
         // Reuse pre-allocated arrays
@@ -44,10 +68,10 @@ internal struct TdtModelInference: Sendable {
 
         // Reuse decoder state output buffers to avoid CoreML allocating new ones
         // Note: outputBackings expects raw backing objects (MLMultiArray / CVPixelBuffer)
-        predictionOptions.outputBackings = [
-            "h_out": state.hiddenState,
-            "c_out": state.cellState,
-        ]
+        var backings: [String: Any] = outputBackings
+        backings["h_out"] = state.hiddenState
+        backings["c_out"] = state.cellState
+        predictionOptions.outputBackings = backings
 
         let output = try model.prediction(
             from: input,
@@ -79,6 +103,7 @@ internal struct TdtModelInference: Sendable {
     ///     when a caller-level feature (e.g. language-aware script filtering)
     ///     actually consumes the top-K; otherwise the K-length Swift arrays
     ///     are allocated per step and thrown away.
+    ///   - outputBackings: Buffers for the joint's other outputs (`outputBackings(for:excluding:)`)
     ///
     /// - Returns: Joint decision (token, probability, duration bin)
     func runJointPrepared(
@@ -93,7 +118,8 @@ internal struct TdtModelInference: Sendable {
         tokenIdBacking: MLMultiArray,
         tokenProbBacking: MLMultiArray,
         durationBacking: MLMultiArray,
-        needsTopK: Bool = false
+        needsTopK: Bool = false,
+        outputBackings: [String: MLMultiArray] = [:]
     ) throws -> TdtJointDecision {
 
         // Fill encoder step with the requested frame
@@ -104,11 +130,11 @@ internal struct TdtModelInference: Sendable {
         preparedDecoderStep.prefetchToNeuralEngine()
 
         // Reuse tiny output tensors for joint prediction (provide raw MLMultiArray backings)
-        predictionOptions.outputBackings = [
-            "token_id": tokenIdBacking,
-            "token_prob": tokenProbBacking,
-            "duration": durationBacking,
-        ]
+        var backings: [String: Any] = outputBackings
+        backings["token_id"] = tokenIdBacking
+        backings["token_prob"] = tokenProbBacking
+        backings["duration"] = durationBacking
+        predictionOptions.outputBackings = backings
 
         // Execute joint network using the reusable provider
         let output = try model.prediction(
